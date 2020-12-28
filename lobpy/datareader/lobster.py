@@ -13,10 +13,15 @@ import csv
 import math
 import warnings
 from sortedcontainers import SortedDict
+from typing import Callable
 
 import numpy as np
 import pandas as pd
 from lobpy.datareader.orderbook import *
+from pandas.tseries.holiday import AbstractHolidayCalendar, DateOffset, EasterMonday, GoodFriday, Holiday, MO, \
+    nearest_workday, next_monday, next_monday_or_tuesday, USMartinLutherKingJr, USLaborDay, USThanksgivingDay, \
+    USMemorialDay, USPresidentsDay
+import datetime as dt
 
 
 # LOBSTER specific file name functions
@@ -76,6 +81,110 @@ def _calc_mid_price(bid: float, ask: float):
     return (bid + ask) / 2.
 
 
+def _calc_spread(bid: float, ask: float):
+    if np.isnan(bid) or np.abs(bid) > 99999 or np.isnan(ask) or np.abs(ask) > 99999:
+        return np.nan
+
+    return ask - bid
+
+
+def _calc_touch_volume(bid_volume: float, ask_volume: float):
+    is_bid_nan = np.isnan(bid_volume)
+    is_ask_nan = np.isnan(ask_volume)
+    if is_bid_nan:
+        if is_ask_nan:
+            return np.nan
+        else:
+            return ask_volume
+    else:
+        if is_ask_nan:
+            return bid_volume
+        else:
+            return (bid_volume + ask_volume) / 2.
+
+
+def _prev_workday(day: str, cal: AbstractHolidayCalendar) -> pd.Timestamp:
+    ts = pd.Timestamp(day)
+    return ts + pd.offsets.CustomBusinessDay(-1, calendar=cal)
+
+
+class HOLUSD(AbstractHolidayCalendar):
+    """
+    A representation of all the holidays in the US trading calendar.
+    ----------
+    params:
+            year
+
+
+    Example usage:
+    to create an object
+    >>> holidays = HOLUSD()
+
+    """
+    rules = [
+        Holiday('NewYearsDay', month=1, day=1, observance=nearest_workday),
+        USMartinLutherKingJr,
+        USPresidentsDay,
+        GoodFriday,
+        USMemorialDay,
+        Holiday('USIndependenceDay', month=7, day=4, observance=nearest_workday),
+        USLaborDay,
+        USThanksgivingDay,
+        Holiday('Christmas', month=12, day=25, observance=nearest_workday)
+    ]
+
+
+class HOLGBP(AbstractHolidayCalendar):
+    """
+        A representation of all the holidays in the US trading calendar.
+        ----------
+        params:
+                year
+
+
+        Example usage:
+        to create an object
+        >>> holidays = HOLGBP()
+
+    """
+    rules = [
+        Holiday('New Years Day', month=1, day=1, observance=next_monday),
+        GoodFriday,
+        EasterMonday,
+        Holiday('Early May Bank Holiday', month=5, day=1, offset=DateOffset(weekday=MO(1))),
+        Holiday('Spring Bank Holiday', month=5, day=31, offset=DateOffset(weekday=MO(-1))),
+        Holiday('Summer Bank Holiday', month=8, day=31, offset=DateOffset(weekday=MO(-1))),
+        Holiday('Christmas Day', month=12, day=25, observance=next_monday),
+        Holiday('Boxing Day', month=12, day=26, observance=next_monday_or_tuesday)
+    ]
+
+
+def _filter_time(lst, start_time, end_time):
+    return [a for a in lst if start_time <= a < end_time]
+
+
+def batch_data(dataset_period: pd.DataFrame, computation: Callable[pd.DataFrame: list], interval_ms, time_offset_ms,
+               time_period_ms):
+    time_interval = time_period_ms - time_offset_ms
+    slots = np.floor(time_interval / interval_ms)
+    slotted_list = []
+    data = []
+    time_periods = dataset_period['Time']
+    for i in range(slots):
+        slotted_list.append(
+            _filter_time(time_periods, time_offset_ms + interval_ms * i, time_offset_ms + interval_ms * (i + 1)))
+    for slot in slots:
+        selected_frames = pd.loc[(pd['Time'].isin(slot))]
+        data.append(computation(selected_frames))
+    # now bucket into times, and then find SD of each bucket!
+    return data
+
+
+def _calc_returns(selected_frames) -> list:
+    mid_prices, shifted_prices = selected_frames['Mid_Prices'], selected_frames['Shifted Prices']
+    return [np.log(a, b) for a, b in zip(mid_prices, shifted_prices)]
+
+
 class LOBSTERReader(OBReader):
     """
     OBReader object specified for using LOBSTER files
@@ -131,6 +240,7 @@ class LOBSTERReader(OBReader):
         if not (time_end_calc_str == ""):
             self.time_end_calc = int(time_end_calc_str)
 
+    # FIXME: Use Functool Wrap to correct the function reference on the print statement
     def _calc_occurrence_rate(self, order_type: int, num_levels_calc_str=str(), write_outputfile=False):
         print("Starting computation of average cancellation rate in file %s." % self.lobfilename)
 
@@ -292,6 +402,93 @@ class LOBSTERReader(OBReader):
 
             self._write_output_to_csv(num_levels_calc, mean[1::2], mean[0::2])
             return mean[1::2], mean[0::2]
+
+    def variance_profile_tt(self, num_levels_calc_str="", write_outputfile=False):
+        """ Computes the average order book profile, averaged over trading time, from the csv sourcefile. To avoid numerical errors by summing up large numbers, the Kahan Summation algorithm is used for mean computation
+        ----------
+        args:
+            num_levels_calc:    number of levels which should be considered for the output
+            write_output:       if True, then the average order book profile is stored as a csv file
+        ----------
+        output:
+            (std_dev_bid, std_dev_ask)  in format of numpy arrays
+        """
+
+        print("Starting computation of average order book profile in file %s." % self.lobfilename)
+
+        num_levels_calc = self.get_num_levels(num_levels_calc_str)
+        # this is the mean of ask, mean of bid. Find mid price of these
+        mean = self.average_profile_tt(num_levels_calc_str, write_outputfile)
+        mid_mean = (mean[0] + mean[1]) / 2
+
+        tempval1 = 0.0
+        tempval2 = 0.0
+        comp = np.zeros(num_levels_calc * 2)  # compensator for lost low-order bits
+        variance = np.zeros(num_levels_calc * 2)  # running mean
+
+        with open(self.lobfilename + ".csv", newline='') as csvfile:
+            lobdata = csv.reader(csvfile, delimiter=',')
+            num_lines = sum(1 for row in lobdata)
+            print("Loaded successfully. Number of lines: " + str(num_lines))
+            csvfile.seek(0)  # reset iterator to beginning of the file
+            print("Start calculation.")
+            for row in lobdata:  # data are read as list of strings
+                currorders = np.fromiter(row[1:(4 * num_levels_calc + 1):2], np.float)  # parse to integer
+                for ctr, currorder in enumerate(currorders):
+                    # print(lobstate)
+                    # use meanmidprice[ctr] here instead of mean[ctr]
+                    tempval1 = (currorder / num_lines - mid_mean[np.int(ctr / 2)]) ** 2 - comp[ctr]
+                    tempval2 = variance[ctr] + tempval1
+                    comp[ctr] = (tempval2 - variance[ctr]) - tempval1
+                    variance[ctr] = tempval2
+
+            print("Calculation finished.")
+
+            # Add data to self.data
+            self.add_data("--".join(("ttime-" + AV_ORDERBOOK_FILE_ID, "bid")), mean[1::2])
+            self.add_data("--".join(("ttime-" + AV_ORDERBOOK_FILE_ID, "ask")), mean[0::2])
+
+            if not write_outputfile:
+                # LOBster format: bid data at odd * 2, LOBster format: ask data at even * 2
+                return variance[1::2], variance[0::2]
+
+            self._write_output_to_csv(num_levels_calc, variance[1::2], variance[0::2])
+            return variance[1::2], variance[0::2]
+
+    def standardize_price_levels(self, num_levels_calc=""):
+        """ Convert limit order book price levels from absolute prices to percentage of at-the-touch bid/ask price.
+                ----------
+                args:
+                    num_levels_calc:    number of levels which should be considered for the output
+                    write_output:       if True, then the average order book profile is stored as a csv file
+                ----------
+                output:
+                    pandas
+        """
+
+        def _calc_price(price: float):
+            if np.isnan(price) or np.abs(price) > 99999:
+                return np.nan
+            return price
+
+        def _calc_volume(volume: float):
+            if np.isnan(volume) or np.abs(volume) > 99999999:
+                return np.nan
+            return volume
+
+        with open(self.lobfilename + ".csv", newline='') as orderbookfile:
+            lobdata = csv.reader(orderbookfile, delimiter=',')
+            rowLOB = next(lobdata)
+            new_prices = np.array(len(rowLOB))
+            for rowLOB in lobdata:
+                currprofile = np.fromiter(rowLOB, np.float)  # parse to float, extract bucket volumes only at t(0)
+                updated_prices = np.fromiter(currprofile[0:(4 * num_levels_calc) + 1:2], _calc_price)
+                updated_sizes = np.fromiter(currprofile[1:(4 * num_levels_calc) + 1:2], _calc_volume)
+                updated_values = np.empty((updated_prices.size + updated_sizes.size,), dtype=updated_prices.dtype)
+                updated_values[0::2] = updated_prices
+                updated_values[1::2] = updated_sizes
+                new_prices.append(updated_values)
+        return new_prices
 
     def _write_output_to_csv(self, num_levels_calc, **kwargs):
         print("Write output file.")
@@ -801,13 +998,52 @@ class LOBSTERReader(OBReader):
         sod_price = list(mid_prices)[0]
         return np.fromiter((np.log(x / sod_price) for x in mid_prices), np.float)
 
-    def log_returns_over_time(self, time_offset_ms: float, time_period_ms: float, interval_ms: float, num_levels_calc=None):
+    def volume_at_touch_over_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+            time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
+
+        return times, bid_volumes, ask_volumes
+
+    def batch_spreads_over_time(self, time_offset_ms: float, time_period_ms: float, interval_ms: float,
+                                num_levels_calc=None):
+        return batch_data(self.spreads_over_time(time_offset_ms, time_period_ms, num_levels_calc),
+                          lambda x: x, interval_ms, time_offset_ms, time_period_ms)
+
+    def spreads_over_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
+        """Returns log returns for time period involved
+                Output:
+                two pandas dataframes - one with mid prices, one with bid-ask spreads"""
+
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+            time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
+
+        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
+                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes'])
+
+        mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
+                                 np.float)
+        mid_prices = np.ma.masked_equal(mid_prices, 0)
+        mid_prices = mid_prices.compressed()[~np.isnan(mid_prices.compressed())]
+
+        spreads = np.fromiter((_calc_spread(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
+                              np.float)
+        spreads = np.ma.masked_equal(spreads, 0)
+        spreads = spreads.compressed()[~np.isnan(spreads.compressed())]
+
+        dataset_period['Mid Prices'] = mid_prices
+        dataset_period['Spread'] = spreads
+
+        return dataset_period
+
+    def batch_log_returns_in_time(self, time_offset_ms: float, time_period_ms: float, interval_ms: float,
+                                  num_levels_calc=None):
+        return batch_data(self.log_returns_over_time(time_offset_ms, time_period_ms, num_levels_calc),
+                          _calc_returns, interval_ms, time_offset_ms, time_period_ms)
+
+    def log_returns_over_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
         """Returns log returns for time period involved
         Output:
         standard deviation (volatility) of log-returns"""
-
-        def _filter_time(lst, start_time, end_time):
-            return [a for a in lst if start_time <= a < end_time]
 
         times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
@@ -823,22 +1059,7 @@ class LOBSTERReader(OBReader):
         dataset_period['Mid Prices'] = mid_prices
         dataset_period['Shifted Prices'] = shifted_prices
 
-        time_interval = time_period_ms - time_offset_ms
-        slots = np.floor(time_interval / interval_ms)
-
-        slotted_list = []
-        returns = []
-        time_periods = dataset_period['Time']
-        for i in range(slots):
-            slotted_list.append(_filter_time(time_periods, time_offset_ms + interval_ms * i, time_offset_ms + interval_ms * (i + 1)))
-
-        for slot in slots:
-            selected_frames = pd.loc[(pd['Time'].isin(slot))]
-            mid_prices, shifted_prices = selected_frames['Mid_Prices'], selected_frames['Shifted Prices']
-            returns.append([np.log(a, b) for a, b in zip(mid_prices, shifted_prices)])
-        # now bucket into times, and then find SD of each bucket!
-
-        return returns
+        return dataset_period
 
     def select_orders_within_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
         """ Returns a four numpy arrays with message and orderbook data of the bid- and ask-side of the order book
@@ -861,7 +1082,7 @@ class LOBSTERReader(OBReader):
             lobdata = pd.DataFrame(messagedata[messagedata.columns[0]]).join(lobdata)
             cols = ['Time']
             for i in range(self.num_levels * 4):
-                bidask = 'Bid' if np.floor(i / 4) % 2 else 'Ask'
+                bidask = 'Bid' if np.floor(i / 2) % 2 else 'Ask'
                 size = 'Size' if i % 2 else ''
                 cols.append('_'.join((bidask, str(np.floor(i / 4) + 1), size)))
             lobdata.columns = cols
@@ -876,4 +1097,13 @@ class LOBSTERReader(OBReader):
             ask_volumes = np.array(lobdata[lobdata.columns[2]])
             times = np.array(messagedata[messagedata.columns[0]])
             return times, bid_prices, bid_volumes, ask_prices, ask_volumes
+
+    def calc_normalization_vals(self):
+        prev_day_reader = LOBSTERReader(self.ticker_str, _prev_workday(self.date_str, HOLUSD()).__str__(),
+                                        str(self.time_start), self.time_end_str, self.num_levels_str)
+        mean_bid, mean_ask = prev_day_reader.average_profile_tt()
+        mean = np.mean((mean_bid[0], mean_ask[0]))
+        std_dev = 1
+
+        return mean, std_dev
 # END LOBSTERReader

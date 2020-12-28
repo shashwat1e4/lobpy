@@ -98,7 +98,7 @@ class OBReader():
         self.data = dict()
         self.num_levels = None
 
-    def set_obfilename(filename):
+    def set_obfilename(self, filename):
         self.lobfilename = filename
         return True
 
