@@ -12,7 +12,7 @@ definitions:
         script:
           - if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           - pip install pytest
-          - pytest -v test/* --junitxml=test-reports/report.xml
+          - pytest -v lobpy/test/* --junitxml=test-reports/report.xml
     - step: &Pylint
         name: Lint Code
         script:
