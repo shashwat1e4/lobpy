@@ -1,4 +1,3 @@
-#### %load lobpy/lobpy/datareader/lobster.py
 """
 Copyright (c) 2018, University of Oxford, Rama Cont and ETH Zurich, Marvin S. Mueller
 
@@ -25,6 +24,8 @@ import datetime as dt
 
 
 # LOBSTER specific file name functions
+PRICE_IN_USD = 10000
+
 
 def _split_lobster_filename(filename):
     """ splits the LOBSTER-type filename into Ticker, Date, Time Start, Time End, File Type, Number of Levels """
@@ -108,6 +109,32 @@ def _prev_workday(day: str, cal: AbstractHolidayCalendar) -> pd.Timestamp:
     return ts + pd.offsets.CustomBusinessDay(-1, calendar=cal)
 
 
+def _filter_time(lst, start_time, end_time):
+    return [a for a in lst if start_time <= a < end_time]
+
+
+def batch_data(dataset_period: pd.DataFrame, computation: Callable[pd.DataFrame: list], interval_ms, time_offset_ms,
+               time_period_ms):
+    time_interval = time_period_ms - time_offset_ms
+    slots = np.floor(time_interval / interval_ms)
+    slotted_list = []
+    data = []
+    time_periods = dataset_period['Time']
+    for i in range(slots):
+        slotted_list.append(
+            _filter_time(time_periods, time_offset_ms + interval_ms * i, time_offset_ms + interval_ms * (i + 1)))
+    for slot in slots:
+        selected_frames = pd.loc[(pd['Time'].isin(slot))]
+        data.append(computation(selected_frames))
+    # now bucket into times, and then find SD of each bucket!
+    return data
+
+
+def _calc_returns(selected_frames) -> list:
+    mid_prices, shifted_prices = selected_frames['Mid_Prices'], selected_frames['Shifted Prices']
+    return [np.log(a, b) for a, b in zip(mid_prices, shifted_prices)]
+
+
 class HOLUSD(AbstractHolidayCalendar):
     """
     A representation of all the holidays in the US trading calendar.
@@ -157,33 +184,6 @@ class HOLGBP(AbstractHolidayCalendar):
         Holiday('Christmas Day', month=12, day=25, observance=next_monday),
         Holiday('Boxing Day', month=12, day=26, observance=next_monday_or_tuesday)
     ]
-
-
-def _filter_time(lst, start_time, end_time):
-    return [a for a in lst if start_time <= a < end_time]
-
-
-def batch_data(dataset_period: pd.DataFrame, computation: Callable[pd.DataFrame: list], interval_ms, time_offset_ms,
-               time_period_ms):
-    time_interval = time_period_ms - time_offset_ms
-    slots = np.floor(time_interval / interval_ms)
-    slotted_list = []
-    data = []
-    time_periods = dataset_period['Time']
-    for i in range(slots):
-        slotted_list.append(
-            _filter_time(time_periods, time_offset_ms + interval_ms * i, time_offset_ms + interval_ms * (i + 1)))
-    for slot in slots:
-        selected_frames = pd.loc[(pd['Time'].isin(slot))]
-        data.append(computation(selected_frames))
-    # now bucket into times, and then find SD of each bucket!
-    return data
-
-
-def _calc_returns(selected_frames) -> list:
-    mid_prices, shifted_prices = selected_frames['Mid_Prices'], selected_frames['Shifted Prices']
-    return [np.log(a, b) for a, b in zip(mid_prices, shifted_prices)]
-
 
 class LOBSTERReader(OBReader):
     """
@@ -264,7 +264,7 @@ class LOBSTERReader(OBReader):
                     cancellation_count.setdefault(float(rowMES[4]) - self._calc_midprice(rowLOB), []).append(1)
 
             for rel_price, entries in cancellation_count.items():
-                cancellation_hist.setdefault(rel_price / 10000, sum(entries) / total_time)
+                cancellation_hist.setdefault(rel_price / PRICE_IN_USD, sum(entries) / total_time)
 
             relative_prices = np.array(cancellation_hist.keys())
             cancellation_rates = np.array(cancellation_hist.values())
