@@ -5,3 +5,8 @@ pipelines:
     - step:
         script:
           - git push --mirror git@github.com:shashwat1e4/lobpy.git
+  branches:
+    '{develop, main, master}'
+    - step:
+        script:
+          - echo "Skip non-protected branches"
