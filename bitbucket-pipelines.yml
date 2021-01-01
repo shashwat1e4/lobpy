@@ -28,8 +28,8 @@ definitions:
 pipelines:
   default:
 #    - parallel:
-    - step: *Test-run
-#        - step: *Pylint
+#      - step: *Test-run
+#      - step: *Pylint
   branches:
     master:
       - step: *Github-sync
