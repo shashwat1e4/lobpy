@@ -1,5 +1,5 @@
 """
-Copyright (c) 2020, Shashwat Saxena.
+Copyright (c) 2021, Shashwat Saxena.
 
 This module provides the helper functions and the class XAssetAgent, a reinforcement learning agent which will make
 trading decisions based on LOBSTERReader data.
