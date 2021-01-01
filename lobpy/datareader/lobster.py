@@ -1004,6 +1004,36 @@ class LOBSTERReader(OBReader):
 
         return times, bid_volumes, ask_volumes
 
+    def cumulative_notional_over_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
+        """Returns cumulative notionals for time period involved
+                Output:
+                two pandas dataframes - one with mid prices, one with bid-ask spreads"""
+
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+            time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
+
+        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
+                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes'])
+
+        mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
+                                 np.float)
+        mid_prices = np.ma.masked_equal(mid_prices, 0)
+        mid_prices = mid_prices.compressed()[~np.isnan(mid_prices.compressed())]
+
+        bid_notional = [np.fromiter((price[0] * qty[0] for price, qty in zip(bid_prices, bid_volumes)), np.float)]
+        ask_notional = [np.fromiter((price[0] * qty[0] for price, qty in zip(ask_prices, ask_volumes)), np.float)]
+
+        for i in range(1, num_levels_calc):
+            ask_notional.append(np.fromiter((price[i] * qty[i] for price, qty in zip(ask_prices, ask_volumes)),
+                                            np.float) + ask_notional[-1])
+            bid_notional.append(np.fromiter((price[i] * qty[i] for price, qty in zip(bid_prices, bid_volumes)),
+                                            np.float) + bid_notional[-1])
+
+        bid_ntnl_data = pd.DataFrame(data=np.array(bid_notional), columns=["Cumulative Bid Notional Level " + str(i) for i in num_levels_calc])
+        ask_ntnl_data = pd.DataFrame(data=np.array(ask_notional), columns=["Cumulative Ask Notional Level " + str(i) for i in num_levels_calc])
+        bid_data_joined = dataset_period.join(bid_ntnl_data)
+        return bid_data_joined.join(ask_ntnl_data)
+
     def batch_spreads_over_time(self, time_offset_ms: float, time_period_ms: float, interval_ms: float,
                                 num_levels_calc=None):
         return batch_data(self.spreads_over_time(time_offset_ms, time_period_ms, num_levels_calc),
