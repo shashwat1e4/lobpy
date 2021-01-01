@@ -12,13 +12,20 @@ import csv
 import math
 import warnings
 from sortedcontainers import SortedDict
+from typing import Callable
 
 import numpy as np
-
+import pandas as pd
 from lobpy.datareader.orderbook import *
+from pandas.tseries.holiday import AbstractHolidayCalendar, DateOffset, EasterMonday, GoodFriday, Holiday, MO, \
+    nearest_workday, next_monday, next_monday_or_tuesday, USMartinLutherKingJr, USLaborDay, USThanksgivingDay, \
+    USMemorialDay, USPresidentsDay
+import datetime as dt
 
 
 # LOBSTER specific file name functions
+PRICE_IN_USD = 10000
+
 
 def _split_lobster_filename(filename):
     """ splits the LOBSTER-type filename into Ticker, Date, Time Start, Time End, File Type, Number of Levels """
@@ -52,7 +59,7 @@ def _get_time_stamp_before(time_stamps, time_stamp):
     time = time_stamps[0]
     index = int(0)
     if time == time_stamp:
-        # time_stamp found at index 0    
+        # time_stamp found at index 0
         return time, index
     if time > time_stamp:
         raise LookupError("Time stamp data start at {} which is after time_stamps: {}".format(time, time_stamp))
@@ -64,10 +71,124 @@ def _get_time_stamp_before(time_stamps, time_stamp):
     return time, ctr + 1
 
 
+def _calc_mid_price(bid: float, ask: float):
+    if np.isnan(bid) or np.abs(bid) > 99999:
+        if np.isnan(ask) or np.abs(ask) > 99999:
+            return np.nan
+        else:
+            return ask
+    elif np.isnan(ask) or np.abs(ask) > 99999:
+        return bid
+    return (bid + ask) / 2.
+
+
+def _calc_spread(bid: float, ask: float):
+    if np.isnan(bid) or np.abs(bid) > 99999 or np.isnan(ask) or np.abs(ask) > 99999:
+        return np.nan
+
+    return ask - bid
+
+
+def _calc_touch_volume(bid_volume: float, ask_volume: float):
+    is_bid_nan = np.isnan(bid_volume)
+    is_ask_nan = np.isnan(ask_volume)
+    if is_bid_nan:
+        if is_ask_nan:
+            return np.nan
+        else:
+            return ask_volume
+    else:
+        if is_ask_nan:
+            return bid_volume
+        else:
+            return (bid_volume + ask_volume) / 2.
+
+
+def _prev_workday(day: str, cal: AbstractHolidayCalendar) -> pd.Timestamp:
+    ts = pd.Timestamp(day)
+    return ts + pd.offsets.CustomBusinessDay(-1, calendar=cal)
+
+
+def _filter_time(lst, start_time, end_time):
+    return [a for a in lst if start_time <= a < end_time]
+
+
+def batch_data(dataset_period: pd.DataFrame, computation: Callable[pd.DataFrame: list], interval_ms, time_offset_ms,
+               time_period_ms):
+    time_interval = time_period_ms - time_offset_ms
+    slots = np.floor(time_interval / interval_ms)
+    slotted_list = []
+    data = []
+    time_periods = dataset_period['Time']
+    for i in range(slots):
+        slotted_list.append(
+            _filter_time(time_periods, time_offset_ms + interval_ms * i, time_offset_ms + interval_ms * (i + 1)))
+    for slot in slots:
+        selected_frames = pd.loc[(pd['Time'].isin(slot))]
+        data.append(computation(selected_frames))
+    # now bucket into times, and then find SD of each bucket!
+    return data
+
+
+def _calc_returns(selected_frames) -> list:
+    mid_prices, shifted_prices = selected_frames['Mid_Prices'], selected_frames['Shifted Prices']
+    return [np.log(a, b) for a, b in zip(mid_prices, shifted_prices)]
+
+
+class HOLUSD(AbstractHolidayCalendar):
+    """
+    A representation of all the holidays in the US trading calendar.
+    ----------
+    params:
+            year
+
+
+    Example usage:
+    to create an object
+    >>> holidays = HOLUSD()
+
+    """
+    rules = [
+        Holiday('NewYearsDay', month=1, day=1, observance=nearest_workday),
+        USMartinLutherKingJr,
+        USPresidentsDay,
+        GoodFriday,
+        USMemorialDay,
+        Holiday('USIndependenceDay', month=7, day=4, observance=nearest_workday),
+        USLaborDay,
+        USThanksgivingDay,
+        Holiday('Christmas', month=12, day=25, observance=nearest_workday)
+    ]
+
+
+class HOLGBP(AbstractHolidayCalendar):
+    """
+        A representation of all the holidays in the US trading calendar.
+        ----------
+        params:
+                year
+
+
+        Example usage:
+        to create an object
+        >>> holidays = HOLGBP()
+
+    """
+    rules = [
+        Holiday('New Years Day', month=1, day=1, observance=next_monday),
+        GoodFriday,
+        EasterMonday,
+        Holiday('Early May Bank Holiday', month=5, day=1, offset=DateOffset(weekday=MO(1))),
+        Holiday('Spring Bank Holiday', month=5, day=31, offset=DateOffset(weekday=MO(-1))),
+        Holiday('Summer Bank Holiday', month=8, day=31, offset=DateOffset(weekday=MO(-1))),
+        Holiday('Christmas Day', month=12, day=25, observance=next_monday),
+        Holiday('Boxing Day', month=12, day=26, observance=next_monday_or_tuesday)
+    ]
+
 class LOBSTERReader(OBReader):
     """
     OBReader object specified for using LOBSTER files
-    ---------- 
+    ----------
     params:
             ticker_str,
             date_str,
@@ -119,17 +240,8 @@ class LOBSTERReader(OBReader):
         if not (time_end_calc_str == ""):
             self.time_end_calc = int(time_end_calc_str)
 
-    def get_cancellation_rates_tt(self, num_levels_calc_str=str(), write_outputfile=False):
-        """ Computes the average cancellation rate over the course of the trading day against the distance to best
-        quote. To avoid numerical errors by summing up large numbers, the Kahan Summation algorithm is used for mean
-        computation
-        ----------
-        args:
-            write_output:         if True, then the average order book profile is stored as a csv file
-        ----------
-        output:
-            (distance_from_best_quote, mean_cancellation_rate)  in format of numpy arrays
-        """
+    # FIXME: Use Functool Wrap to correct the function reference on the print statement
+    def _calc_occurrence_rate(self, order_type: int, num_levels_calc_str=str(), write_outputfile=False):
         print("Starting computation of average cancellation rate in file %s." % self.lobfilename)
 
         num_levels_calc = self.get_num_levels(num_levels_calc_str)
@@ -140,20 +252,19 @@ class LOBSTERReader(OBReader):
             messagedata = csv.reader(messagefile, delimiter=',')
             num_lines = sum(1 for row in lobdata)
             print("Loaded successfully. Number of lines: " + str(num_lines))
-            lobdata.seek(0)  # reset iterator to beginning of the file
             print("Start calculation.")
+            orderbookfile.seek(0)
+            messagefile.seek(0)
             total_time = self.time_end_calc - self.time_start_calc
             cancellation_count = SortedDict()
             cancellation_hist = SortedDict()
-
             # data are read as list of strings
             for rowLOB, rowMES in zip(lobdata, messagedata):
-                if rowLOB['Event Type'] is not '2':
-                    continue # short out non-cancel orders
-                cancellation_count.setdefault(rowMES['Price'] - self._calc_midprice(rowLOB), []).append(1)
+                if int(rowLOB[1]) == order_type:
+                    cancellation_count.setdefault(float(rowMES[4]) - self._calc_midprice(rowLOB), []).append(1)
 
-            for rel_price, entries in cancellation_count.iteritems():
-                cancellation_hist.setdefault(rel_price, sum(entries / total_time))
+            for rel_price, entries in cancellation_count.items():
+                cancellation_hist.setdefault(rel_price / PRICE_IN_USD, sum(entries) / total_time)
 
             relative_prices = np.array(cancellation_hist.keys())
             cancellation_rates = np.array(cancellation_hist.values())
@@ -161,15 +272,75 @@ class LOBSTERReader(OBReader):
                 self._write_output_to_csv(num_levels_calc, relative_prices, cancellation_rates)
             return relative_prices, cancellation_rates
 
+    def get_partial_cancellation_rates_tt(self, num_levels_calc_str=str(), write_outputfile=False):
+        """ Computes the average cancellation rate over the course of the trading day against the distance to best
+        quote. To avoid numerical errors by summing up large numbers, the Kahan Summation algorithm is used for mean
+        computation
+        ----------
+        args:
+            write_output:         if True, then the average order book profile is stored as a csv file
+        ----------
+        output:
+            (distance_from_best_quote, mean_cancellation_rate)  in format of numpy arrays
+        """
+        return self._calc_occurrence_rate(2, num_levels_calc_str=num_levels_calc_str, write_outputfile=write_outputfile)
+
+    def get_total_cancellation_rates_tt(self, num_levels_calc_str=str(), write_outputfile=False):
+        """ Computes the average cancellation rate over the course of the trading day against the distance to best
+        quote. To avoid numerical errors by summing up large numbers, the Kahan Summation algorithm is used for mean
+        computation
+        ----------
+        args:
+            write_output:         if True, then the average order book profile is stored as a csv file
+        ----------
+        output:
+            (distance_from_best_quote, mean_cancellation_rate)  in format of numpy arrays
+        """
+        return self._calc_occurrence_rate(3, num_levels_calc_str=num_levels_calc_str, write_outputfile=write_outputfile)
+
+    def get_all_cancellation_rates_tt(self, num_levels_calc_str=str(), write_outputfile=False):
+        """ Computes the average cancellation rate over the course of the trading day against the distance to best
+        quote. To avoid numerical errors by summing up large numbers, the Kahan Summation algorithm is used for mean
+        computation
+        ----------
+        args:
+            write_output:         if True, then the average order book profile is stored as a csv file
+        ----------
+        output:
+            (distance_from_best_quote, mean_cancellation_rate)  in format of numpy arrays
+        """
+        partial_prices, partial_rates = self._calc_occurrence_rate(2, num_levels_calc_str=num_levels_calc_str,
+                                                                   write_outputfile=False)
+        total_prices, total_rates = self._calc_occurrence_rate(2, num_levels_calc_str=num_levels_calc_str,
+                                                               write_outputfile=False)
+
+        combined_prices = np.append(partial_prices, [total_prices])
+        combined_rates = np.append(partial_rates, [total_rates])
+
+        if write_outputfile:
+            self._write_output_to_csv(self.get_num_levels(num_levels_calc_str), combined_prices, combined_rates)
+        return combined_prices, combined_rates
+
+    def get_arrival_rates_tt(self, num_levels_calc_str=str(), write_outputfile=False):
+        """ Computes the average cancellation rate over the course of the trading day against the distance to best
+        quote. To avoid numerical errors by summing up large numbers, the Kahan Summation algorithm is used for mean
+        computation
+        ----------
+        args:
+            write_output:         if True, then the average order book profile is stored as a csv file
+        ----------
+        output:
+            (distance_from_best_quote, mean_cancellation_rate)  in format of numpy arrays
+        """
+        return self._calc_occurrence_rate(1, num_levels_calc_str=num_levels_calc_str, write_outputfile=write_outputfile)
 
     def _calc_midprice(self, orderbook_row, weighted=False):
-        ask_price, ask_qty, bid_price, bid_qty = orderbook_row[0:4]
+        ask_price, ask_qty, bid_price, bid_qty = [float(x) for x in orderbook_row[0:4]]
         bid_price = ask_price if abs(bid_price) == 9999999999 else bid_price
         ask_price = bid_price if abs(ask_price) == 9999999999 else ask_price
         ask_qty, bid_qty = (ask_qty, bid_qty) if weighted else (1, 1)
 
         return (ask_price * ask_qty + bid_price * bid_qty) / (ask_qty + bid_qty)
-
 
     def set_timecalc(self, time_start_calc_str, time_end_calc_str):
         self.time_start_calc = int(time_start_calc_str)
@@ -184,7 +355,7 @@ class LOBSTERReader(OBReader):
                                         str(self.time_end_calc), identifier_str, str(num_levels))
 
     def average_profile_tt(self, num_levels_calc_str="", write_outputfile=False):
-        """ Computes the average order book profile, averaged over trading time, from the csv sourcefile. To avoid numerical errors by summing up large numbers, the Kahan Summation algorithm is used for mean computation 
+        """ Computes the average order book profile, averaged over trading time, from the csv sourcefile. To avoid numerical errors by summing up large numbers, the Kahan Summation algorithm is used for mean computation
         ----------
         args:
             num_levels_calc:    number of levels which should be considered for the output
@@ -231,6 +402,93 @@ class LOBSTERReader(OBReader):
 
             self._write_output_to_csv(num_levels_calc, mean[1::2], mean[0::2])
             return mean[1::2], mean[0::2]
+
+    def variance_profile_tt(self, num_levels_calc_str="", write_outputfile=False):
+        """ Computes the average order book profile, averaged over trading time, from the csv sourcefile. To avoid numerical errors by summing up large numbers, the Kahan Summation algorithm is used for mean computation
+        ----------
+        args:
+            num_levels_calc:    number of levels which should be considered for the output
+            write_output:       if True, then the average order book profile is stored as a csv file
+        ----------
+        output:
+            (std_dev_bid, std_dev_ask)  in format of numpy arrays
+        """
+
+        print("Starting computation of average order book profile in file %s." % self.lobfilename)
+
+        num_levels_calc = self.get_num_levels(num_levels_calc_str)
+        # this is the mean of ask, mean of bid. Find mid price of these
+        mean = self.average_profile_tt(num_levels_calc_str, write_outputfile)
+        mid_mean = (mean[0] + mean[1]) / 2
+
+        tempval1 = 0.0
+        tempval2 = 0.0
+        comp = np.zeros(num_levels_calc * 2)  # compensator for lost low-order bits
+        variance = np.zeros(num_levels_calc * 2)  # running mean
+
+        with open(self.lobfilename + ".csv", newline='') as csvfile:
+            lobdata = csv.reader(csvfile, delimiter=',')
+            num_lines = sum(1 for row in lobdata)
+            print("Loaded successfully. Number of lines: " + str(num_lines))
+            csvfile.seek(0)  # reset iterator to beginning of the file
+            print("Start calculation.")
+            for row in lobdata:  # data are read as list of strings
+                currorders = np.fromiter(row[1:(4 * num_levels_calc + 1):2], np.float)  # parse to integer
+                for ctr, currorder in enumerate(currorders):
+                    # print(lobstate)
+                    # use meanmidprice[ctr] here instead of mean[ctr]
+                    tempval1 = (currorder / num_lines - mid_mean[np.int(ctr / 2)]) ** 2 - comp[ctr]
+                    tempval2 = variance[ctr] + tempval1
+                    comp[ctr] = (tempval2 - variance[ctr]) - tempval1
+                    variance[ctr] = tempval2
+
+            print("Calculation finished.")
+
+            # Add data to self.data
+            self.add_data("--".join(("ttime-" + AV_ORDERBOOK_FILE_ID, "bid")), mean[1::2])
+            self.add_data("--".join(("ttime-" + AV_ORDERBOOK_FILE_ID, "ask")), mean[0::2])
+
+            if not write_outputfile:
+                # LOBster format: bid data at odd * 2, LOBster format: ask data at even * 2
+                return variance[1::2], variance[0::2]
+
+            self._write_output_to_csv(num_levels_calc, variance[1::2], variance[0::2])
+            return variance[1::2], variance[0::2]
+
+    def standardize_price_levels(self, num_levels_calc=""):
+        """ Convert limit order book price levels from absolute prices to percentage of at-the-touch bid/ask price.
+                ----------
+                args:
+                    num_levels_calc:    number of levels which should be considered for the output
+                    write_output:       if True, then the average order book profile is stored as a csv file
+                ----------
+                output:
+                    pandas
+        """
+
+        def _calc_price(price: float):
+            if np.isnan(price) or np.abs(price) > 99999:
+                return np.nan
+            return price
+
+        def _calc_volume(volume: float):
+            if np.isnan(volume) or np.abs(volume) > 99999999:
+                return np.nan
+            return volume
+
+        with open(self.lobfilename + ".csv", newline='') as orderbookfile:
+            lobdata = csv.reader(orderbookfile, delimiter=',')
+            rowLOB = next(lobdata)
+            new_prices = np.array(len(rowLOB))
+            for rowLOB in lobdata:
+                currprofile = np.fromiter(rowLOB, np.float)  # parse to float, extract bucket volumes only at t(0)
+                updated_prices = np.fromiter(currprofile[0:(4 * num_levels_calc) + 1:2], _calc_price)
+                updated_sizes = np.fromiter(currprofile[1:(4 * num_levels_calc) + 1:2], _calc_volume)
+                updated_values = np.empty((updated_prices.size + updated_sizes.size,), dtype=updated_prices.dtype)
+                updated_values[0::2] = updated_prices
+                updated_values[1::2] = updated_sizes
+                new_prices.append(updated_values)
+        return new_prices
 
     def _write_output_to_csv(self, num_levels_calc, **kwargs):
         print("Write output file.")
@@ -326,7 +584,7 @@ class LOBSTERReader(OBReader):
                         mean[ctr] = tempval2
 
                     if time_end == nexttime:
-                        # Finish calculation                    
+                        # Finish calculation
                         break
 
                 ## Update order book to time t(i+1)
@@ -374,7 +632,7 @@ class LOBSTERReader(OBReader):
     ):
         ''' Extracts the volume of orders in the first num_level buckets at a uniform time grid of num_observations observations from the interval [time_start_calc, time_end_calc]. The volume process is extrapolated constantly on the last level in the file, for the case that time_end_calc is larger than the last time stamp in the file. profile2vol_fct allows to specify how the volume should be summarized from the profile. Typical choices are np.sum or np.mean.
 
-        Note: Due to possibly large amount of data we iterate through the file instead of reading the whole file into an array. 
+        Note: Due to possibly large amount of data we iterate through the file instead of reading the whole file into an array.
         '''
 
         time_start_calc = float(self.time_start_calc) / 1000.
@@ -444,7 +702,7 @@ class LOBSTERReader(OBReader):
     ):
         ''' Extracts the volume of orders in the first num_level buckets at a uniform time grid of num_observations observations from the interval [time_start_calc, time_end_calc]. The volume process is extrapolated constantly on the last level in the file, for the case that time_end_calc is larger than the last time stamp in the file. profile2vol_fct allows to specify how the volume should be summarized from the profile. Typical choices are np.sum or np.mean.
 
-        Note: Due to possibly large amount of data we iterate through the file instead of reading the whole file into an array. 
+        Note: Due to possibly large amount of data we iterate through the file instead of reading the whole file into an array.
         '''
 
         time_start_calc = float(self.time_start_calc) / 1000.
@@ -523,7 +781,7 @@ class LOBSTERReader(OBReader):
     ):
         ''' Extracts the volume of orders in the first num_level buckets from the interval [time_start_calc, time_end_calc].  profile2vol_fct allows to specify how the volume should be summarized from the profile. Typical choices are np.sum or np.mean. If ret_np==False then the output format are lists, else numpy arrays
 
-        Note: Due to possibly large amount of data we iterate through the file instead of reading the whole file into an array. 
+        Note: Due to possibly large amount of data we iterate through the file instead of reading the whole file into an array.
         '''
         time_start_calc = float(self.time_start_calc) / 1000.
         time_end_calc = float(self.time_end_calc) / 1000.
@@ -698,4 +956,184 @@ class LOBSTERReader(OBReader):
         '''
         return self._load_profile_snapshot_lobster(time_stamp, num_levels_calc)
 
-    # END LOBSTERReader
+    def get_start_and_end_bell_tickers(self, include_quote_starts: bool, num_levels_calc=None):
+        ''' Returns a two numpy arrays with snapshots of the bid- and ask-side of the order book at a given time stamp
+                Output:
+                bid_prices, bid_volume, ask_prices, ask_volume
+        '''
+        if num_levels_calc is None:
+            num_levels_calc = self.num_levels_calc
+
+        with open((self.lobfilename + '.csv')) as orderbookfile, open(self.msgfilename + '.csv') as messagefile:
+            # Read data from csv file
+            lobdata = csv.reader(orderbookfile, delimiter=',')
+            messagedata = csv.reader(messagefile, delimiter=',')
+            # get first row
+            # data are read as list of strings
+            rowMES = next(messagedata)
+            rowLOB = next(lobdata)
+
+            time_finish = float(rowMES[-2])
+
+            for rowMES in messagedata:
+                if int(rowMES[1]) == 7 and int(rowMES[5]) == -1:
+                    if int(rowMES[4]) == 0 and not include_quote_starts:
+                        continue
+                    rowMES_next = next(rowMES)
+                    if float(rowMES_next[0]) > time_finish:
+                        raise DataRequestError("Found an invalid timestamp")
+                    bid_prices, bid_volume, ask_prices, ask_volume = self.load_profile_snapshot(rowMES_next[0])
+                    print(bid_prices, bid_volume, ask_prices, ask_volume)
+
+    def log_prices_over_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
+        """Returns log returns for time period involved
+        Output:
+        standard deviation (volatility) of log-returns"""
+        bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+            time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
+        mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
+                                 np.float)
+        mid_prices = np.ma.masked_equal(mid_prices, 0)
+        mid_prices = mid_prices.compressed()[~np.isnan(mid_prices.compressed())]
+        sod_price = list(mid_prices)[0]
+        return np.fromiter((np.log(x / sod_price) for x in mid_prices), np.float)
+
+    def volume_at_touch_over_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+            time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
+
+        return times, bid_volumes, ask_volumes
+
+    def cumulative_notional_over_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
+        """Returns cumulative notionals for time period involved
+                Output:
+                two pandas dataframes - one with mid prices, one with bid-ask spreads"""
+
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+            time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
+
+        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
+                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes'])
+
+        mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
+                                 np.float)
+        mid_prices = np.ma.masked_equal(mid_prices, 0)
+        mid_prices = mid_prices.compressed()[~np.isnan(mid_prices.compressed())]
+
+        bid_notional = [np.fromiter((price[0] * qty[0] for price, qty in zip(bid_prices, bid_volumes)), np.float)]
+        ask_notional = [np.fromiter((price[0] * qty[0] for price, qty in zip(ask_prices, ask_volumes)), np.float)]
+
+        for i in range(1, num_levels_calc):
+            ask_notional.append(np.fromiter((price[i] * qty[i] for price, qty in zip(ask_prices, ask_volumes)),
+                                            np.float) + ask_notional[-1])
+            bid_notional.append(np.fromiter((price[i] * qty[i] for price, qty in zip(bid_prices, bid_volumes)),
+                                            np.float) + bid_notional[-1])
+
+        bid_ntnl_data = pd.DataFrame(data=np.array(bid_notional), columns=["Cumulative Bid Notional Level " + str(i) for i in num_levels_calc])
+        ask_ntnl_data = pd.DataFrame(data=np.array(ask_notional), columns=["Cumulative Ask Notional Level " + str(i) for i in num_levels_calc])
+        bid_data_joined = dataset_period.join(bid_ntnl_data)
+        return bid_data_joined.join(ask_ntnl_data)
+
+    def batch_spreads_over_time(self, time_offset_ms: float, time_period_ms: float, interval_ms: float,
+                                num_levels_calc=None):
+        return batch_data(self.spreads_over_time(time_offset_ms, time_period_ms, num_levels_calc),
+                          lambda x: x, interval_ms, time_offset_ms, time_period_ms)
+
+    def spreads_over_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
+        """Returns log returns for time period involved
+                Output:
+                two pandas dataframes - one with mid prices, one with bid-ask spreads"""
+
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+            time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
+
+        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
+                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes'])
+
+        mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
+                                 np.float)
+        mid_prices = np.ma.masked_equal(mid_prices, 0)
+        mid_prices = mid_prices.compressed()[~np.isnan(mid_prices.compressed())]
+
+        spreads = np.fromiter((_calc_spread(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
+                              np.float)
+        spreads = np.ma.masked_equal(spreads, 0)
+        spreads = spreads.compressed()[~np.isnan(spreads.compressed())]
+
+        dataset_period['Mid Prices'] = mid_prices
+        dataset_period['Spread'] = spreads
+
+        return dataset_period
+
+    def batch_log_returns_in_time(self, time_offset_ms: float, time_period_ms: float, interval_ms: float,
+                                  num_levels_calc=None):
+        return batch_data(self.log_returns_over_time(time_offset_ms, time_period_ms, num_levels_calc),
+                          _calc_returns, interval_ms, time_offset_ms, time_period_ms)
+
+    def log_returns_over_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
+        """Returns log returns for time period involved
+        Output:
+        standard deviation (volatility) of log-returns"""
+
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+            time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
+
+        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
+                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes'])
+
+        mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
+                                 np.float)
+        mid_prices = np.ma.masked_equal(mid_prices, 0)
+        mid_prices = mid_prices.compressed()[~np.isnan(mid_prices.compressed())]
+        shifted_prices = [mid_prices[0]] + list(mid_prices)[1:]
+        dataset_period['Mid Prices'] = mid_prices
+        dataset_period['Shifted Prices'] = shifted_prices
+
+        return dataset_period
+
+    def select_orders_within_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
+        """ Returns a four numpy arrays with message and orderbook data of the bid- and ask-side of the order book
+        at a given time stamp
+        Output:
+        bid_prices, bid_volume, ask_prices, ask_volume
+        """
+        if num_levels_calc is None:
+            num_levels_calc = self.num_levels_calc
+
+        with open((self.lobfilename + '.csv')) as orderbookfile, open(self.msgfilename + '.csv') as messagefile:
+            # Read data from csv file
+            lobdata = pd.read_csv(orderbookfile, sep=',')
+            messagedata = pd.read_csv(messagefile, sep=',',
+                                      names=['Time', 'Event_Type', 'Order_Id', 'Size', 'Price', 'Direction', 'NaN'])
+
+            time_file = float(messagedata[messagedata.columns[0]][0])
+            time_start = time_file + time_offset_ms
+            time_stop = time_start + time_period_ms
+            lobdata = pd.DataFrame(messagedata[messagedata.columns[0]]).join(lobdata)
+            cols = ['Time']
+            for i in range(self.num_levels * 4):
+                bidask = 'Bid' if np.floor(i / 2) % 2 else 'Ask'
+                size = 'Size' if i % 2 else ''
+                cols.append('_'.join((bidask, str(np.floor(i / 4) + 1), size)))
+            lobdata.columns = cols
+            messagedata = messagedata.loc[(messagedata['Time'] <= time_stop) & (messagedata['Time'] >= time_start)]
+            lobdata = lobdata.loc[(lobdata['Time'] <= time_stop) & (lobdata['Time'] >= time_start)]
+
+            # conversion of price levels to USD
+            bid_prices = np.array(lobdata[lobdata.columns[3]].apply(lambda x: x / float(10000)))
+            bid_volumes = np.array(lobdata[lobdata.columns[4]])
+            # conversion of price levels to USD
+            ask_prices = np.array(lobdata[lobdata.columns[1]].apply(lambda x: x / float(10000)))
+            ask_volumes = np.array(lobdata[lobdata.columns[2]])
+            times = np.array(messagedata[messagedata.columns[0]])
+            return times, bid_prices, bid_volumes, ask_prices, ask_volumes
+
+    def calc_normalization_vals(self):
+        prev_day_reader = LOBSTERReader(self.ticker_str, _prev_workday(self.date_str, HOLUSD()).__str__(),
+                                        str(self.time_start), self.time_end_str, self.num_levels_str)
+        mean_bid, mean_ask = prev_day_reader.average_profile_tt()
+        mean = np.mean((mean_bid[0], mean_ask[0]))
+        std_dev = 1
+
+        return mean, std_dev
+# END LOBSTERReader
