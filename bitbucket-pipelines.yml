@@ -12,7 +12,7 @@ definitions:
         script:
           - if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           - pip install pytest
-          - pytest -v tests/* --junitxml=test-reports/report.xml
+          - pytest -v test/* --junitxml=test-reports/report.xml
     - step: &Pylint
         name: Lint Code
         script:
@@ -27,9 +27,9 @@ definitions:
 
 pipelines:
   default:
-    - parallel:
-        - step: *Test-run
-        - step: *Pylint
+#    - parallel:
+    - step: *Test-run
+#        - step: *Pylint
   branches:
     master:
       - step: *Github-sync
