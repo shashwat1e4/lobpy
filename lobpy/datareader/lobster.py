@@ -1075,20 +1075,24 @@ class LOBSTERReader(OBReader):
         Output:
         standard deviation (volatility) of log-returns"""
 
+        dataset_period = self.mid_prices_over_time(num_levels_calc, time_offset_ms, time_period_ms)
+        mid_prices = dataset_period['Mid Prices']
+        shifted_prices = [mid_prices[0]] + list(mid_prices)[1:]
+        dataset_period['Shifted Prices'] = shifted_prices
+        dataset_period['Log Returns'] = [np.log(a, b) for a, b in zip(mid_prices, shifted_prices)]
+
+        return dataset_period
+
+    def mid_prices_over_time(self, num_levels_calc: float, time_offset_ms: float, time_period_ms: float):
         times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
-
         dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
                                       columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes'])
-
         mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
                                  np.float)
         mid_prices = np.ma.masked_equal(mid_prices, 0)
         mid_prices = mid_prices.compressed()[~np.isnan(mid_prices.compressed())]
-        shifted_prices = [mid_prices[0]] + list(mid_prices)[1:]
         dataset_period['Mid Prices'] = mid_prices
-        dataset_period['Shifted Prices'] = shifted_prices
-
         return dataset_period
 
     def select_orders_within_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
