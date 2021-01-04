@@ -113,7 +113,7 @@ def _filter_time(lst, start_time, end_time):
     return [a for a in lst if start_time <= a < end_time]
 
 
-def batch_data(dataset_period: pd.DataFrame, computation: Callable[pd.DataFrame: list], interval_ms, time_offset_ms,
+def batch_data(dataset_period: pd.DataFrame, computation: Callable[[pd.DataFrame], list], interval_ms, time_offset_ms,
                time_period_ms):
     time_interval = time_period_ms - time_offset_ms
     slots = np.floor(time_interval / interval_ms)
