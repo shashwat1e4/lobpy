@@ -24,6 +24,7 @@ import datetime as dt
 
 
 # LOBSTER specific file name functions
+GDRIVE_COLAB_MOUNT = "/content/gdrive/My Drive/Colab Notebooks/"
 PRICE_IN_USD = 10000
 
 
@@ -218,14 +219,16 @@ class LOBSTERReader(OBReader):
             num_levels_str,
             time_start_calc_str="",
             time_end_calc_str="",
-            num_levels_calc_str=""
+            num_levels_calc_str="",
+            gdrive_mount=False,
     ):
+        __prefix = GDRIVE_COLAB_MOUNT if gdrive_mount else str()
         self.ticker_str = ticker_str
         self.date_str = date_str
-        self.lobfilename = _create_lobster_filename(ticker_str, date_str, time_start_str, time_end_str,
-                                                    ORDERBOOK_FILE_ID, num_levels_str)
-        self.msgfilename = _create_lobster_filename(ticker_str, date_str, time_start_str, time_end_str, MESSAGE_FILE_ID,
-                                                    num_levels_str)
+        self.lobfilename = __prefix + _create_lobster_filename(ticker_str, date_str, time_start_str, time_end_str,
+                                                               ORDERBOOK_FILE_ID, num_levels_str)
+        self.msgfilename = __prefix + _create_lobster_filename(ticker_str, date_str, time_start_str, time_end_str,
+                                                               MESSAGE_FILE_ID, num_levels_str)
         self.time_start = int(time_start_str)
         self.time_end = int(time_end_str)
         self.num_levels = int(num_levels_str)
