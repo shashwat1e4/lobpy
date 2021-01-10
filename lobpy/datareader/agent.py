@@ -98,7 +98,8 @@ class XAssetAgent:
     def __init__(self,
                  num_assets: int,
                  readers: list,
-                 max_inventory: list):
+                 max_inventory: list,
+                 cash_held: float):
         if not all([len(arg) == num_assets for arg in [readers, max_inventory]]):
             raise DataRequestError("Make sure all input lists match the number of assets")
         self.num_assets = num_assets
@@ -107,6 +108,7 @@ class XAssetAgent:
         self.current_inventory = [0 for _ in range(num_assets)]
         self.bid_orders = []
         self.ask_orders = []
+        self.cash_held = cash_held
 
     def inventory_ratio(self):
         return [curr_inv / max_inv for curr_inv, max_inv in zip(self.current_inventory, self.max_inventory)]
