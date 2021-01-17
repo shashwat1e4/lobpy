@@ -50,7 +50,7 @@ class State:
         self.agent_position = agent_position
         self.agent_cash = agent_cash
         self.accumulated_penalty = accumulated_penalty
-        self.time_to_eod = self.time_to_eod
+        self.time_to_eod = time_to_eod
 
 
 def value_fn(state: State, regularization_param: float = 1.0):
