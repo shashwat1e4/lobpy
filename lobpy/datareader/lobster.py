@@ -1016,7 +1016,8 @@ class LOBSTERReader(OBReader):
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
 
         dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
-                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes'])
+                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
+                                               'Buy Intensity', 'Sell Intensity'])
 
         mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
                                  np.float)
@@ -1051,7 +1052,8 @@ class LOBSTERReader(OBReader):
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
 
         dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
-                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes'])
+                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
+                                               'Buy Intensity', 'Sell Intensity'])
 
         mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
                                  np.float)
@@ -1090,7 +1092,8 @@ class LOBSTERReader(OBReader):
         times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
         dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
-                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes'])
+                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
+                                               'Buy Intensity', 'Sell Intensity'])
         mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
                                  np.float)
         mid_prices = np.ma.masked_equal(mid_prices, 0)
@@ -1113,6 +1116,17 @@ class LOBSTERReader(OBReader):
             messagedata = pd.read_csv(messagefile, sep=',',
                                       names=['Time', 'Event_Type', 'Order_Id', 'Size', 'Price', 'Direction', 'NaN'])
 
+            start_time = lobdata['Time'].iloc[0]
+
+            # Direction is marked as sell (-1), since a buy market order liquidates a sell LO
+            buy_mo = messagedata.loc[(messagedata['Direction'] == -1)
+                                     & ((messagedata['Event_Type'] == 4) or (messagedata['Event_Type'] == 5))]
+            buy_intensity = [index / (time - start_time) for index, time in enumerate(buy_mo['Time'])]
+            # Direction is marked as buy (+1), since a sell market order liquidates a buy LO
+            sell_mo = messagedata.loc[(messagedata['Direction'] == 1)
+                                      & ((messagedata['Event_Type'] == 4) or (messagedata['Event_Type'] == 5))]
+            sell_intensity = [index / (time - start_time) for index, time in enumerate(sell_mo['Time'])]
+
             time_file = float(messagedata[messagedata.columns[0]][0])
             time_start = time_file + time_offset_ms
             time_stop = time_start + time_period_ms
@@ -1133,7 +1147,7 @@ class LOBSTERReader(OBReader):
             ask_prices = np.array(lobdata[lobdata.columns[1]].apply(lambda x: x / float(10000)))
             ask_volumes = np.array(lobdata[lobdata.columns[2]])
             times = np.array(messagedata[messagedata.columns[0]])
-            return times, bid_prices, bid_volumes, ask_prices, ask_volumes
+            return times, bid_prices, bid_volumes, ask_prices, ask_volumes, buy_intensity, sell_intensity
 
     def calc_normalization_vals(self):
         prev_day_reader = LOBSTERReader(self.ticker_str, _prev_workday(self.date_str, HOLUSD()).__str__(),
