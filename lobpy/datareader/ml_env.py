@@ -70,7 +70,7 @@ class AgentState:
         return np.linspace(self.qty_low_bound, self.qty_high_bound, num=int(1 / self.sig_fig))
 
     @property
-    def est_log_penalized_value(self, is_bid_side=True) -> np.ndarray[float]:
+    def est_log_penalized_value(self, is_bid_side=True) -> np.ndarray:
         # w(t, q) = exp(A) * z
         fill_prob = self.bid_fill_prob if is_bid_side else self.ask_fill_prob
         qty = self.quantity_space
@@ -137,7 +137,7 @@ class ValueNetEstimator:
         self.sig_fig = sig_fig
 
     @staticmethod
-    def _targets(training_input: np.ndarray[AgentState]) -> np.ndarray:
+    def _targets(training_input: np.ndarray) -> np.ndarray:
         return np.fromiter((state.est_value_fn for state in training_input), float)
 
     @staticmethod
