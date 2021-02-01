@@ -168,11 +168,11 @@ class ValueNetEstimator:
         return states
 
     def train(self, steps: int):
-        training_input = self._parse_states()
+        training_input = self._parse_states(self.readers, self.qty_low_bound, self.qty_high_bound, self.max_cash)
         targets = self._targets(training_input)
         for _ in range(steps):
-            output = self.network(training_input)
-            loss = self.loss_fn(targets, output)
+            output = [self.network(train_in) for train_in in training_input]
+            loss = self.loss_fn(list(targets), output)
             loss.backward()
             for param in self.network.parameters():
                 param.data.add_(- param.grad / steps)
