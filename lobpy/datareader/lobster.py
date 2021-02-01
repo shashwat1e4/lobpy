@@ -1116,7 +1116,7 @@ class LOBSTERReader(OBReader):
             messagedata = pd.read_csv(messagefile, sep=',',
                                       names=['Time', 'Event_Type', 'Order_Id', 'Size', 'Price', 'Direction', 'NaN'])
 
-            start_time = lobdata['Time'].iloc[0]
+            start_time = messagedata['Time'].iloc[0]
 
             # Direction is marked as sell (-1), since a buy market order liquidates a sell LO
             buy_mo = messagedata.loc[(messagedata['Direction'] == -1)
