@@ -992,7 +992,7 @@ class LOBSTERReader(OBReader):
         """Returns log returns for time period involved
         Output:
         standard deviation (volatility) of log-returns"""
-        bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+        bid_prices, bid_volumes, ask_prices, ask_volumes, buy_intensity, sell_intensity = self.select_orders_within_time(
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
         mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
                                  np.float)
@@ -1012,10 +1012,11 @@ class LOBSTERReader(OBReader):
                 Output:
                 two pandas dataframes - one with mid prices, one with bid-ask spreads"""
 
-        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes, buy_intensity, sell_intensity = self.select_orders_within_time(
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
 
-        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
+        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes,
+                                                     buy_intensity, sell_intensity]),
                                       columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
                                                'Buy Intensity', 'Sell Intensity'])
 
@@ -1048,10 +1049,11 @@ class LOBSTERReader(OBReader):
                 Output:
                 two pandas dataframes - one with mid prices, one with bid-ask spreads"""
 
-        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes, buy_intensity, sell_intensity = self.select_orders_within_time(
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
 
-        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
+        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes,
+                                                     buy_intensity, sell_intensity]),
                                       columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
                                                'Buy Intensity', 'Sell Intensity'])
 
@@ -1089,9 +1091,10 @@ class LOBSTERReader(OBReader):
         return dataset_period
 
     def mid_prices_over_time(self, num_levels_calc: float, time_offset_ms: float, time_period_ms: float):
-        times, bid_prices, bid_volumes, ask_prices, ask_volumes = self.select_orders_within_time(
+        times, bid_prices, bid_volumes, ask_prices, ask_volumes, buy_intensity, sell_intensity = self.select_orders_within_time(
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
-        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes]),
+        dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes,
+                                                     buy_intensity, sell_intensity]),
                                       columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
                                                'Buy Intensity', 'Sell Intensity'])
         mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
