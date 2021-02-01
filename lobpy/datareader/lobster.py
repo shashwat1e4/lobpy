@@ -1120,11 +1120,11 @@ class LOBSTERReader(OBReader):
 
             # Direction is marked as sell (-1), since a buy market order liquidates a sell LO
             buy_mo = messagedata.loc[(messagedata['Direction'] == -1)
-                                     & ((messagedata['Event_Type'] == 4) or (messagedata['Event_Type'] == 5))]
+                                     & ((messagedata['Event_Type'] == 4) | (messagedata['Event_Type'] == 5))]
             buy_intensity = [index / (time - start_time) for index, time in enumerate(buy_mo['Time'])]
             # Direction is marked as buy (+1), since a sell market order liquidates a buy LO
             sell_mo = messagedata.loc[(messagedata['Direction'] == 1)
-                                      & ((messagedata['Event_Type'] == 4) or (messagedata['Event_Type'] == 5))]
+                                      & ((messagedata['Event_Type'] == 4) | (messagedata['Event_Type'] == 5))]
             sell_intensity = [index / (time - start_time) for index, time in enumerate(sell_mo['Time'])]
 
             time_file = float(messagedata[messagedata.columns[0]][0])
