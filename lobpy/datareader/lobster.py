@@ -12,7 +12,6 @@ import csv
 import math
 import warnings
 from sortedcontainers import SortedDict
-from collections import deque
 from typing import Callable
 
 import numpy as np
