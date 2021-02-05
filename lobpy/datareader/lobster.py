@@ -24,6 +24,13 @@ import datetime as dt
 
 
 # LOBSTER specific file name functions
+DIRECTION = 'Direction'
+PRICE = 'Price'
+SIZE = 'Size'
+ORDER_ID = 'Order_Id'
+EVENT_TYPE = 'Event_Type'
+TIME = 'Time'
+DOLLAR_PRICE_MULTIPLIER = 10000
 GDRIVE_COLAB_MOUNT = "/content/gdrive/My Drive/Colab Notebooks/"
 PRICE_IN_USD = 10000
 
@@ -120,12 +127,12 @@ def batch_data(dataset_period: pd.DataFrame, computation, interval_ms, time_offs
     slots = np.floor(time_interval / interval_ms)
     slotted_list = []
     data = []
-    time_periods = dataset_period['Time']
+    time_periods = dataset_period[TIME]
     for i in range(slots):
         slotted_list.append(
             _filter_time(time_periods, time_offset_ms + interval_ms * i, time_offset_ms + interval_ms * (i + 1)))
     for slot in slots:
-        selected_frames = pd.loc[(pd['Time'].isin(slot))]
+        selected_frames = pd.loc[(pd[TIME].isin(slot))]
         data.append(computation(selected_frames))
     # now bucket into times, and then find SD of each bucket!
     return data
@@ -1016,8 +1023,8 @@ class LOBSTERReader(OBReader):
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
 
         dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes,
-                                                     buy_intensity, sell_intensity]),
-                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
+                                                     buy_intensity, sell_intensity]).transpose(),
+                                      columns=[TIME, 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
                                                'Buy Intensity', 'Sell Intensity'])
 
         mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
@@ -1053,8 +1060,8 @@ class LOBSTERReader(OBReader):
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
 
         dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes,
-                                                     buy_intensity, sell_intensity]),
-                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
+                                                     buy_intensity, sell_intensity]).transpose(),
+                                      columns=[TIME, 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
                                                'Buy Intensity', 'Sell Intensity'])
 
         mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
@@ -1094,8 +1101,8 @@ class LOBSTERReader(OBReader):
         times, bid_prices, bid_volumes, ask_prices, ask_volumes, buy_intensity, sell_intensity = self.select_orders_within_time(
             time_offset_ms, time_period_ms, num_levels_calc=num_levels_calc)
         dataset_period = pd.DataFrame(data=np.array([times, bid_prices, bid_volumes, ask_prices, ask_volumes,
-                                                     buy_intensity, sell_intensity]),
-                                      columns=['Time', 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
+                                                     buy_intensity, sell_intensity]).transpose(),
+                                      columns=[TIME, 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
                                                'Buy Intensity', 'Sell Intensity'])
         mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
                                  np.float)
@@ -1117,40 +1124,55 @@ class LOBSTERReader(OBReader):
             # Read data from csv file
             lobdata = pd.read_csv(orderbookfile, sep=',')
             messagedata = pd.read_csv(messagefile, sep=',',
-                                      names=['Time', 'Event_Type', 'Order_Id', 'Size', 'Price', 'Direction', 'NaN'])
+                                      names=[TIME, EVENT_TYPE, ORDER_ID, SIZE, PRICE, DIRECTION, 'NaN'])
 
-            start_time = messagedata['Time'].iloc[0]
+            times = np.asarray(messagedata[TIME])
 
             # Direction is marked as sell (-1), since a buy market order liquidates a sell LO
-            buy_mo = messagedata.loc[(messagedata['Direction'] == -1)
-                                     & ((messagedata['Event_Type'] == 4) | (messagedata['Event_Type'] == 5))]
-            buy_intensity = [index / (time - start_time) for index, time in enumerate(buy_mo['Time'])]
+            buy_mo = messagedata.loc[(messagedata[DIRECTION] == -1)
+                                     & ((messagedata[EVENT_TYPE] == 4) | (messagedata[EVENT_TYPE] == 5))]
+            buy_table = self.calc_mo_intensity(buy_mo, times)
+            messagedata.join(buy_table.set_index(TIME), on=TIME)
+
             # Direction is marked as buy (+1), since a sell market order liquidates a buy LO
-            sell_mo = messagedata.loc[(messagedata['Direction'] == 1)
-                                      & ((messagedata['Event_Type'] == 4) | (messagedata['Event_Type'] == 5))]
-            sell_intensity = [index / (time - start_time) for index, time in enumerate(sell_mo['Time'])]
+            sell_mo = messagedata.loc[(messagedata[DIRECTION] == 1)
+                                      & ((messagedata[EVENT_TYPE] == 4) | (messagedata[EVENT_TYPE] == 5))]
+            sell_table = self.calc_mo_intensity(sell_mo, times)
+            messagedata.join(sell_table.set_index(TIME), on=TIME)
 
             time_file = float(messagedata[messagedata.columns[0]][0])
             time_start = time_file + time_offset_ms
             time_stop = time_start + time_period_ms
-            lobdata = pd.DataFrame(messagedata[messagedata.columns[0]]).join(lobdata)
-            cols = ['Time']
+            lobdata = pd.DataFrame(messagedata[TIME]).join(lobdata)
+            cols = [TIME]
             for i in range(self.num_levels * 4):
                 bidask = 'Bid' if np.floor(i / 2) % 2 else 'Ask'
-                size = 'Size' if i % 2 else ''
+                size = SIZE if i % 2 else ''
                 cols.append('_'.join((bidask, str(np.floor(i / 4) + 1), size)))
+
             lobdata.columns = cols
-            messagedata = messagedata.loc[(messagedata['Time'] <= time_stop) & (messagedata['Time'] >= time_start)]
-            lobdata = lobdata.loc[(lobdata['Time'] <= time_stop) & (lobdata['Time'] >= time_start)]
+            messagedata = messagedata.loc[(messagedata[TIME] <= time_stop) & (messagedata[TIME] >= time_start)]
+            lobdata = lobdata.loc[(lobdata[TIME] <= time_stop) & (lobdata[TIME] >= time_start)]
 
             # conversion of price levels to USD
-            bid_prices = np.array(lobdata[lobdata.columns[3]].apply(lambda x: x / float(10000)))
-            bid_volumes = np.array(lobdata[lobdata.columns[4]])
+            bid_prices = np.array(lobdata['Bid_1'].apply(lambda x: x / float(DOLLAR_PRICE_MULTIPLIER)))
+            bid_volumes = np.array(lobdata['Bid_1_Size'])
             # conversion of price levels to USD
-            ask_prices = np.array(lobdata[lobdata.columns[1]].apply(lambda x: x / float(10000)))
-            ask_volumes = np.array(lobdata[lobdata.columns[2]])
-            times = np.array(messagedata[messagedata.columns[0]])
-            return times, bid_prices, bid_volumes, ask_prices, ask_volumes, buy_intensity, sell_intensity
+            ask_prices = np.array(lobdata['Ask_1'].apply(lambda x: x / float(10000)))
+            ask_volumes = np.array(lobdata['Ask_1_Size'])
+            buy_intensity = np.array(messagedata['Buy_Intensity'])
+            sell_intensity = np.array(messagedata['Sell_Intensity'])
+
+        return times, bid_prices, bid_volumes, ask_prices, ask_volumes, buy_intensity, sell_intensity
+
+    def calc_mo_intensity(self, buy_mo, times, buy: bool = False):
+        header = 'Buy_Intensity' if buy else 'Sell_Intensity'
+
+        start_time = times[0]
+        mo_count = np.fromiter((1 for time in times if time in buy_mo[TIME]), dtype=float).cumsum()
+        mo_intensity = np.fromiter(((count / (time - start_time) for count, time in zip(times, mo_count))), dtype=float)
+        mo_table = pd.DataFrame(data=np.array([times, mo_intensity]).transpose(), columns=[TIME, header])
+        return mo_table
 
     def calc_normalization_vals(self):
         prev_day_reader = LOBSTERReader(self.ticker_str, _prev_workday(self.date_str, HOLUSD()).__str__(),
