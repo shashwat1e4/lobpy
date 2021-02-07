@@ -76,7 +76,7 @@ class AgentState:
         # w(t, q) = exp(A) * z
         fill_prob = self.bid_fill_prob if is_bid_side else self.ask_fill_prob
         qty = self.quantity_space
-        z = np.fromiter((np.exp(-self.max_running_penalty * fill_prob * quantity ^ 2) for quantity in qty), np.float)
+        z = np.fromiter((np.exp(-self.max_running_penalty * fill_prob * quantity ** 2) for quantity in qty), np.float)
         exp_a = np.zeros((len(qty), len(qty)))
 
         for i in range(len(qty)):
