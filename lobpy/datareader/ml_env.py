@@ -140,7 +140,7 @@ class ValueNetEstimator:
 
     @staticmethod
     def _targets(training_input: np.ndarray) -> np.ndarray:
-        return np.fromiter((state.est_value_fn for state in training_input), np.float)
+        return np.fromiter((state.est_value_fn() for state in training_input), np.float)
 
     @staticmethod
     def _parse_states(readers: List[LOBSTERReader], qty_low_bound: int, qty_high_bound: int, max_cash: float) -> List[
