@@ -79,13 +79,13 @@ def _get_time_stamp_before(time_stamps, time_stamp):
     return time, ctr + 1
 
 
-def _calc_mid_price(bid: float, ask: float):
-    if np.isnan(bid) or np.abs(bid) > 99999:
-        if np.isnan(ask) or np.abs(ask) > 99999:
+def _calc_mid_price(bid: float, ask: float) -> float:
+    if np.isnan(bid) or np.abs(bid) > 1e9:
+        if np.isnan(ask) or np.abs(ask) > 1e9:
             return np.nan
         else:
             return ask
-    elif np.isnan(ask) or np.abs(ask) > 99999:
+    elif np.isnan(ask) or np.abs(ask) > 1e9:
         return bid
     return (bid + ask) / 2.
 
@@ -1104,11 +1104,8 @@ class LOBSTERReader(OBReader):
                                                      buy_intensity, sell_intensity]).transpose(),
                                       columns=[TIME, 'Bid Prices', 'Bid Volumes', 'Ask Prices', 'Ask Volumes',
                                                'Buy Intensity', 'Sell Intensity'])
-        mid_prices = np.fromiter((_calc_mid_price(bid[0], ask[0]) for bid, ask in zip(bid_prices, ask_prices)),
-                                 np.float)
-        mid_prices = np.ma.masked_equal(mid_prices, 0)
-        mid_prices = mid_prices.compressed()[~np.isnan(mid_prices.compressed())]
-        dataset_period['Mid Prices'] = mid_prices
+        dataset_period['Mid Prices'] = np.fromiter((_calc_mid_price(bid, ask)
+                                                    for bid, ask in zip(bid_prices, ask_prices)), np.float)
         return dataset_period
 
     def select_orders_within_time(self, time_offset_ms: float, time_period_ms: float, num_levels_calc=None):
@@ -1120,6 +1117,14 @@ class LOBSTERReader(OBReader):
         if num_levels_calc is None:
             num_levels_calc = self.num_levels_calc
 
+        def buy_mo_intensity(row) -> int:
+            # Direction is marked as sell (-1), since a buy market order liquidates a sell LO
+            return 1 if row[DIRECTION] == -1 and ((row[EVENT_TYPE] == 4) or (row[EVENT_TYPE] == 5)) else 0
+
+        def sell_mo_intensity(row) -> int:
+            # Direction is marked as buy (+1), since a sell market order liquidates a buy LO
+            return 1 if row[DIRECTION] == 1 and ((row[EVENT_TYPE] == 4) or (row[EVENT_TYPE] == 5)) else 0
+
         with open((self.lobfilename + '.csv')) as orderbookfile, open(self.msgfilename + '.csv') as messagefile:
             # Read data from csv file
             lobdata = pd.read_csv(orderbookfile, sep=',')
@@ -1127,18 +1132,12 @@ class LOBSTERReader(OBReader):
                                       names=[TIME, EVENT_TYPE, ORDER_ID, SIZE, PRICE, DIRECTION, 'NaN'])
 
             times = np.asarray(messagedata[TIME])
+            start_time = times[0]
 
-            # Direction is marked as sell (-1), since a buy market order liquidates a sell LO
-            buy_mo = messagedata.loc[(messagedata[DIRECTION] == -1)
-                                     & ((messagedata[EVENT_TYPE] == 4) | (messagedata[EVENT_TYPE] == 5))]
-            buy_table = self.calc_mo_intensity(buy_mo, times)
-            messagedata.join(buy_table.set_index(TIME), on=TIME)
-
-            # Direction is marked as buy (+1), since a sell market order liquidates a buy LO
-            sell_mo = messagedata.loc[(messagedata[DIRECTION] == 1)
-                                      & ((messagedata[EVENT_TYPE] == 4) | (messagedata[EVENT_TYPE] == 5))]
-            sell_table = self.calc_mo_intensity(sell_mo, times)
-            messagedata.join(sell_table.set_index(TIME), on=TIME)
+            messagedata['Buy_Intensity'] = messagedata.apply(buy_mo_intensity, axis=1).cumsum() / (
+                    messagedata[TIME] - start_time)
+            messagedata['Sell_Intensity'] = messagedata.apply(sell_mo_intensity, axis=1).cumsum() / (
+                    messagedata[TIME] - start_time)
 
             time_file = float(messagedata[messagedata.columns[0]][0])
             time_start = time_file + time_offset_ms
@@ -1147,8 +1146,9 @@ class LOBSTERReader(OBReader):
             cols = [TIME]
             for i in range(self.num_levels * 4):
                 bidask = 'Bid' if np.floor(i / 2) % 2 else 'Ask'
-                size = SIZE if i % 2 else ''
-                cols.append('_'.join((bidask, str(np.floor(i / 4) + 1), size)))
+                column_name = (bidask, str(int(np.floor(i / 4) + 1)), SIZE) if i % 2 \
+                    else (bidask, str(int(np.floor(i / 4) + 1)))
+                cols.append('_'.join(column_name))
 
             lobdata.columns = cols
             messagedata = messagedata.loc[(messagedata[TIME] <= time_stop) & (messagedata[TIME] >= time_start)]
@@ -1164,15 +1164,6 @@ class LOBSTERReader(OBReader):
             sell_intensity = np.array(messagedata['Sell_Intensity'])
 
         return times, bid_prices, bid_volumes, ask_prices, ask_volumes, buy_intensity, sell_intensity
-
-    def calc_mo_intensity(self, buy_mo, times, buy: bool = False):
-        header = 'Buy_Intensity' if buy else 'Sell_Intensity'
-
-        start_time = times[0]
-        mo_count = np.fromiter((1 for time in times if time in buy_mo[TIME]), dtype=float).cumsum()
-        mo_intensity = np.fromiter(((count / (time - start_time) for count, time in zip(times, mo_count))), dtype=float)
-        mo_table = pd.DataFrame(data=np.array([times, mo_intensity]).transpose(), columns=[TIME, header])
-        return mo_table
 
     def calc_normalization_vals(self):
         prev_day_reader = LOBSTERReader(self.ticker_str, _prev_workday(self.date_str, HOLUSD()).__str__(),
