@@ -150,10 +150,10 @@ class ValueNetEstimator:
             # Get all mid prices
             eod_time = reader.time_end - reader.time_start
             dataset = reader.mid_prices_over_time(reader.num_levels, 0, eod_time)
-            qtys = range(qty_low_bound, qty_high_bound + 1)
-            cash = np.linspace(0, max_cash)
-            fill_prob = np.linspace(1, 100)
-            max_running_penalty = np.linspace(1, 10)
+            qtys = np.linspace(qty_low_bound, qty_high_bound + 1, 1)
+            cash = np.linspace(0, max_cash, 1)
+            fill_prob = np.linspace(1, 100, 1)
+            max_running_penalty = np.linspace(1, 10, 1)
 
             # Investigate use of Cython for this
             for qty, cash, fill, max_penalty in zip(qtys, cash, fill_prob, max_running_penalty):
