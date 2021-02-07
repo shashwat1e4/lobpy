@@ -16,6 +16,8 @@ import torch.nn.functional as F
 from lobpy.datareader.lobster import *
 from scipy.interpolate import interp1d
 
+import time as t
+
 
 class AgentState:
     """
@@ -74,7 +76,7 @@ class AgentState:
         # w(t, q) = exp(A) * z
         fill_prob = self.bid_fill_prob if is_bid_side else self.ask_fill_prob
         qty = self.quantity_space
-        z = np.fromiter((np.exp(-self.max_running_penalty * fill_prob * quantity ^ 2) for quantity in qty), dtype=float)
+        z = np.fromiter((np.exp(-self.max_running_penalty * fill_prob * quantity ^ 2) for quantity in qty), np.float)
         exp_a = np.zeros((len(qty), len(qty)))
 
         for i in range(len(qty)):
@@ -138,7 +140,7 @@ class ValueNetEstimator:
 
     @staticmethod
     def _targets(training_input: np.ndarray) -> np.ndarray:
-        return np.fromiter((state.est_value_fn for state in training_input), float)
+        return np.fromiter((state.est_value_fn for state in training_input), np.float)
 
     @staticmethod
     def _parse_states(readers: List[LOBSTERReader], qty_low_bound: int, qty_high_bound: int, max_cash: float) -> List[
@@ -168,12 +170,17 @@ class ValueNetEstimator:
         return states
 
     def train(self, steps: int):
+        start_time = t.time()
         training_input = self._parse_states(self.readers, self.qty_low_bound, self.qty_high_bound, self.max_cash)
+        print('Parsed Training Data in {} sec'.format(t.time() - start_time))
         targets = self._targets(training_input)
-        for _ in range(steps):
+        print('Calculated Targets in {} sec'.format(t.time() - start_time))
+        for step in range(steps):
+            loop_time = t.time()
             output = [self.network(train_in) for train_in in training_input]
             loss = self.loss_fn(list(targets), output)
             loss.backward()
             for param in self.network.parameters():
                 param.data.add_(- param.grad / steps)
                 param.grad.data.zero_()
+            print('Calibrated {}th step in {} sec'.format(step, t.time() - loop_time))
